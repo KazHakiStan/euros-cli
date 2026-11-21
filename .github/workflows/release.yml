@@ -1,0 +1,134 @@
+name: Release
+
+# Push a tag like v0.1.0 → builds for Windows, Linux and macOS, then a GitHub Release with
+# the archives and SHA256SUMS that install.sh / install.ps1 / `euros update` download.
+# Run by hand (workflow_dispatch) to only build and test, without a release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CURL_VERSION: 8.11.1
+  CURL_SHA256: c7ca7db48b0909743eaef34250da02c19bc61d4f1dcedd6603f109409536ab56
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - name: Tools
+        run: >
+          apk add --no-cache build-base cmake ninja pkgconf perl linux-headers curl tar xz
+          openssl-dev openssl-libs-static zlib-dev zlib-static libsodium-dev libsodium-static
+      - uses: actions/checkout@v4
+      - name: Static libcurl
+        run: sh scripts/build-curl.sh "$PWD/.deps" --with-openssl
+      - name: Build
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) VERSION="${GITHUB_REF_NAME#v}" ;; *) VERSION=0.0.0-ci ;; esac
+          PKG_CONFIG_PATH="$PWD/.deps/lib/pkgconfig" cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DEUROS_STATIC=ON -DEUROS_VERSION="$VERSION"
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/euros dist/euros
+          strip dist/euros
+          file dist/euros || true
+          ./dist/euros --version
+          tar -C dist -czf euros-linux-x86_64.tar.gz euros
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: euros-linux-x86_64.tar.gz
+          retention-days: 1
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install cmake ninja pkg-config libsodium
+      - name: Static libcurl
+        run: sh scripts/build-curl.sh "$PWD/.deps" --with-secure-transport
+      - name: Build
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) VERSION="${GITHUB_REF_NAME#v}" ;; *) VERSION=0.0.0-ci ;; esac
+          PKG_CONFIG_PATH="$PWD/.deps/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig" cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DEUROS_STATIC=ON -DEUROS_VERSION="$VERSION" -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/euros dist/euros
+          strip dist/euros
+          otool -L dist/euros
+          if otool -L dist/euros | grep -q -e /opt/homebrew -e /usr/local; then echo "links to Homebrew"; exit 1; fi
+          ./dist/euros --version
+          tar -C dist -czf euros-macos-arm64.tar.gz euros
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: euros-macos-arm64.tar.gz
+          retention-days: 1
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-curl mingw-w64-x86_64-libsodium zip
+      - name: Build
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) VERSION="${GITHUB_REF_NAME#v}" ;; *) VERSION=0.0.0-ci ;; esac
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DEUROS_VERSION="$VERSION"
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/euros.exe dist/
+          strip dist/euros.exe
+          # The exe plus every MinGW DLL it pulls in (libcurl, libsodium, OpenSSL, ...).
+          ldd dist/euros.exe | awk '$3 ~ /\/mingw64\/bin\// { print $3 }' | sort -u | xargs -I{} cp {} dist/
+          ls dist
+          ./dist/euros.exe --version
+          (cd dist && zip -9 ../euros-windows-x86_64.zip *)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: euros-windows-x86_64.zip
+          retention-days: 1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: sha256sum euros-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" assets/*
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

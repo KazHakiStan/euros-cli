@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "input": "lynx-moss-bell-dawn-427",
+      "normalized": "lynx-moss-bell-dawn-427",
+      "email": "90aa2cb86f21f76eccbc5a74b9d91228@euros.local",
+      "password": "cd8f13c9c391b39d68c6b32160b1cd30098b289193bb2c67f90a6a0f60571edd",
+      "box_seed_hex": "da08c69db7d6ed300717ac812ba6e8d502e721b2216e31d06c145c0945cc1f59",
+      "public_key": "WS5uYy9wWkkZLzhbD6ok5A+kmeY9LCVbNmUGmQnsznk="
+    },
+    {
+      "input": "able-able-able-able-100",
+      "normalized": "able-able-able-able-100",
+      "email": "ae206dc32a7bbe2c1ca9d5299171260e@euros.local",
+      "password": "0cfc6655d790ff29778621e8b67a07f9237f249846c845bd7a9a5c019be3a316",
+      "box_seed_hex": "6300df32f13133a05089fa4810600d584cca2db49d2bc5587a3b1d6e34c60f6a",
+      "public_key": "FGkTJj3A+FJ4UVO/j9Nw5ApAOo8xNjpNtFQPci98lAM="
+    },
+    {
+      "input": "soup-snow-silk-ship-999",
+      "normalized": "soup-snow-silk-ship-999",
+      "email": "b9c57f37f9d0ed018b9bd52d7a8c3253@euros.local",
+      "password": "43f5984e853b046e4520fa5372b226d37706d4110a00b267f1c85ece9914e786",
+      "box_seed_hex": "bba4fa0ca30e97b9d309c66beca6ef4c4207be3f95fc6281ea206508bacf78f4",
+      "public_key": "u7pBZgL4K0yP+JtAnanvG2ogIoWzeTI0frWusF3ND3k="
+    },
+    {
+      "input": "  Lynx Moss_Bell  dawn-427 ",
+      "normalized": "lynx-moss-bell-dawn-427",
+      "email": "90aa2cb86f21f76eccbc5a74b9d91228@euros.local",
+      "password": "cd8f13c9c391b39d68c6b32160b1cd30098b289193bb2c67f90a6a0f60571edd",
+      "box_seed_hex": "da08c69db7d6ed300717ac812ba6e8d502e721b2216e31d06c145c0945cc1f59",
+      "public_key": "WS5uYy9wWkkZLzhbD6ok5A+kmeY9LCVbNmUGmQnsznk="
+    }
+  ],
+  "letters": [
+    {
+      "from": "lynx-moss-bell-dawn-427",
+      "to": "able-able-able-able-100",
+      "nonce_hex": "000102030405060708090a0b0c0d0e0f1011121314151617",
+      "body": "Meet at the old bridge. Мост, 21:00 🔥",
+      "ciphertext": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXyWUcGVr7L+AE8MGMMrJBpulXt5VKWVfE4nTD+53/rBD3Bb7D/FklSdKtC2gkeTaKsAXDtsp6W7ACvH1/OGgJYA+4BFk8PxLdv8mzU/U="
+    }
+  ]
+}
