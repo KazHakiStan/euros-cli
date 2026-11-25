@@ -214,6 +214,31 @@ static void test_tmux_wrap(void)
     free(w);
 }
 
+static void test_sixel_sequence(void)
+{
+    // 2×7: top six rows red, the last one blue → two bands.
+    unsigned char px[2 * 7 * 3] = { 0 };
+    for (int i = 0; i < 2 * 6; ++i)
+    {
+        px[i * 3] = 255;
+    }
+    px[12 * 3 + 2] = 255;
+    px[13 * 3 + 2] = 255;
+    char *seq = picture_sixel_sequence(px, 2, 7);
+    CHECK(seq != NULL && strncmp(seq, "\033Pq\"1;1;2;7#", 12) == 0);
+    CHECK(seq != NULL && strstr(seq, "#180;2;100;0;0") != NULL); // red
+    CHECK(seq != NULL && strstr(seq, "#5;2;0;0;100") != NULL);   // blue
+    CHECK(seq != NULL && strstr(seq, "#180~~-#5@@-") != NULL);
+    CHECK(seq != NULL && strcmp(seq + strlen(seq) - 2, "\033\\") == 0);
+    free(seq);
+
+    unsigned char wide[40 * 1 * 3];
+    memset(wide, 255, sizeof wide);
+    seq = picture_sixel_sequence(wide, 40, 1);
+    CHECK(seq != NULL && strstr(seq, "#215!40@-") != NULL); // run-length encoded
+    free(seq);
+}
+
 int main(void)
 {
     if (keys_init() == false)
@@ -228,6 +253,7 @@ int main(void)
     test_not_a_picture();
     test_kitty_sequence();
     test_tmux_wrap();
+    test_sixel_sequence();
     const char *verdict = failures > 0
         ? "FAILED"
         : "ok";

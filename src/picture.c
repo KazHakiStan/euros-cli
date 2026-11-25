@@ -15,10 +15,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#  include <sys/ioctl.h>
+#  include <unistd.h>
+#endif
+
 // Defined (extern) in stb_image_write's implementation but not declared in its header.
 unsigned char *stbi_zlib_compress(unsigned char *data, int data_len, int *out_len, int quality);
 
 #define KITTY_CHUNK 4096
+#define SIXEL_LEVELS 6 // per channel: a 6×6×6 color cube
+#define SIXEL_COLORS (SIXEL_LEVELS * SIXEL_LEVELS * SIXEL_LEVELS)
+#define CELL_W_GUESS 10
+#define CELL_H_GUESS 20
 #define SHOW_MAX_SIDE 640
 #define FILE_MAX_BYTES (64 * 1024 * 1024)
 
@@ -126,6 +135,10 @@ picture_protocol picture_detect(void)
         {
             return PICTURES_ITERM;
         }
+        if (strcmp(forced, "sixel") == 0)
+        {
+            return PICTURES_SIXEL;
+        }
         return PICTURES_OFF;
     }
     const char *term = getenv("TERM");
@@ -139,7 +152,11 @@ picture_protocol picture_detect(void)
     if (contains(program, "WezTerm") || contains(program, "iTerm.app") || contains(term, "wezterm")
         || getenv("WEZTERM_PANE") != NULL || contains(getenv("LC_TERMINAL"), "iTerm2"))
     {
-        return PICTURES_ITERM;
+        // tmux keeps sixel pictures in the pane and redraws them (window switches, pictures that
+        // arrive in a hidden window); passed-through iTerm2 pictures vanish on the first redraw.
+        return getenv("TMUX") != NULL
+            ? PICTURES_SIXEL
+            : PICTURES_ITERM;
     }
     return PICTURES_OFF;
 }
@@ -153,6 +170,10 @@ const char *picture_protocol_name(picture_protocol p)
     if (p == PICTURES_ITERM)
     {
         return "iterm";
+    }
+    if (p == PICTURES_SIXEL)
+    {
+        return "sixel";
     }
     return "off";
 }
@@ -466,6 +487,194 @@ static void show_iterm(const char *jpeg_b64, size_t jpeg_len, int rows)
     free(seq.data);
 }
 
+static int clamp_byte(int v)
+{
+    return v < 0
+        ? 0
+        : v > 255
+            ? 255
+            : v;
+}
+
+static int cube_level(int v)
+{
+    return (v * (SIXEL_LEVELS - 1) + 127) / 255;
+}
+
+static void sixel_flush(bytes *out, int ch, int count)
+{
+    if (count > 3)
+    {
+        char run[16];
+        snprintf(run, sizeof run, "!%d%c", count, ch);
+        bytes_str(out, run);
+        return;
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        char one = (char)ch;
+        bytes_put(out, &one, 1);
+    }
+}
+
+char *picture_sixel_sequence(const unsigned char *rgb, int w, int h)
+{
+    // Floyd–Steinberg onto the color cube.
+    int *err = calloc((size_t)(w + 2) * 2 * 3, sizeof *err);
+    unsigned char *idx = malloc((size_t)w * (size_t)h);
+    if (err == NULL || idx == NULL)
+    {
+        free(err);
+        free(idx);
+        return NULL;
+    }
+    bool used[SIXEL_COLORS] = { false };
+    for (int y = 0; y < h; ++y)
+    {
+        int *cur = err + (size_t)(y % 2) * (w + 2) * 3;
+        int *next = err + (size_t)((y + 1) % 2) * (w + 2) * 3;
+        memset(next, 0, (size_t)(w + 2) * 3 * sizeof *next);
+        for (int x = 0; x < w; ++x)
+        {
+            int level[3];
+            for (int c = 0; c < 3; ++c)
+            {
+                int v = clamp_byte(rgb[((size_t)y * w + x) * 3 + c] + cur[(x + 1) * 3 + c] / 16);
+                level[c] = cube_level(v);
+                int e = v - level[c] * 255 / (SIXEL_LEVELS - 1);
+                cur[(x + 2) * 3 + c] += e * 7;
+                next[x * 3 + c] += e * 3;
+                next[(x + 1) * 3 + c] += e * 5;
+                next[(x + 2) * 3 + c] += e;
+            }
+            int i = (level[0] * SIXEL_LEVELS + level[1]) * SIXEL_LEVELS + level[2];
+            idx[(size_t)y * w + x] = (unsigned char)i;
+            used[i] = true;
+        }
+    }
+    free(err);
+
+    bytes out = { 0 };
+    char buf[64];
+    snprintf(buf, sizeof buf, "\033Pq\"1;1;%d;%d", w, h);
+    bytes_str(&out, buf);
+    for (int i = 0; i < SIXEL_COLORS; ++i)
+    {
+        if (used[i])
+        {
+            int r = i / (SIXEL_LEVELS * SIXEL_LEVELS), g = i / SIXEL_LEVELS % SIXEL_LEVELS, b = i % SIXEL_LEVELS;
+            snprintf(buf, sizeof buf, "#%d;2;%d;%d;%d", i, r * 100 / (SIXEL_LEVELS - 1),
+                     g * 100 / (SIXEL_LEVELS - 1), b * 100 / (SIXEL_LEVELS - 1));
+            bytes_str(&out, buf);
+        }
+    }
+    for (int y0 = 0; y0 < h; y0 += 6)
+    {
+        bool in_band[SIXEL_COLORS] = { false };
+        for (int y = y0; y < y0 + 6 && y < h; ++y)
+        {
+            for (int x = 0; x < w; ++x)
+            {
+                in_band[idx[(size_t)y * w + x]] = true;
+            }
+        }
+        bool first = true;
+        for (int i = 0; i < SIXEL_COLORS; ++i)
+        {
+            if (in_band[i] == false)
+            {
+                continue;
+            }
+            snprintf(buf, sizeof buf, "%s#%d", first ? "" : "$", i);
+            bytes_str(&out, buf);
+            first = false;
+            int prev = -1, count = 0;
+            for (int x = 0; x < w; ++x)
+            {
+                int bits = 0;
+                for (int k = 0; k < 6 && y0 + k < h; ++k)
+                {
+                    if (idx[(size_t)(y0 + k) * w + x] == i)
+                    {
+                        bits |= 1 << k;
+                    }
+                }
+                int ch = '?' + bits;
+                if (ch != prev && count > 0)
+                {
+                    sixel_flush(&out, prev, count);
+                    count = 0;
+                }
+                prev = ch;
+                ++count;
+            }
+            if (prev != '?')
+            {
+                sixel_flush(&out, prev, count); // a trailing empty run needs no bytes
+            }
+        }
+        bytes_str(&out, "-");
+    }
+    bytes_str(&out, "\033\\");
+    free(idx);
+    if (out.failed)
+    {
+        free(out.data);
+        return NULL;
+    }
+    return (char *)out.data;
+}
+
+// Pixel size of one character cell, if the terminal tells (tmux passes it on); else a guess.
+static void cell_pixels(int *cw, int *ch)
+{
+    *cw = CELL_W_GUESS;
+    *ch = CELL_H_GUESS;
+#ifndef _WIN32
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 && ws.ws_xpixel > 0
+        && ws.ws_ypixel > 0)
+    {
+        *cw = ws.ws_xpixel / ws.ws_col;
+        *ch = ws.ws_ypixel / ws.ws_row;
+    }
+#endif
+}
+
+static bool show_sixel(const unsigned char *rgb, int w, int h, int rows, int max_cols)
+{
+    int cw = 0, chh = 0;
+    cell_pixels(&cw, &chh);
+    int dh = rows * chh;
+    int dw = (int)((long long)w * dh / h);
+    if (dw > max_cols * cw)
+    {
+        dw = max_cols * cw;
+        dh = (int)((long long)h * dw / w);
+    }
+    if (dw > w || dh > h) // never enlarge
+    {
+        dw = w;
+        dh = h;
+    }
+    if (dw < 1 || dh < 1)
+    {
+        return false;
+    }
+    unsigned char *small = picture_shrink(rgb, w, h, dw, dh);
+    char *seq = small != NULL
+        ? picture_sixel_sequence(small, dw, dh)
+        : NULL;
+    free(small);
+    if (seq == NULL)
+    {
+        return false;
+    }
+    fputs(seq, stdout); // tmux understands sixel itself: no passthrough wrapping
+    free(seq);
+    return true;
+}
+
 bool picture_show(picture_protocol p, const char *jpeg_b64, int max_cols, int max_rows)
 {
     if (p == PICTURES_OFF || jpeg_b64 == NULL)
@@ -489,6 +698,10 @@ bool picture_show(picture_protocol p, const char *jpeg_b64, int max_cols, int ma
     if (p == PICTURES_KITTY)
     {
         shown = show_kitty(rgb, w, h, rows);
+    }
+    else if (p == PICTURES_SIXEL)
+    {
+        shown = show_sixel(rgb, w, h, rows, max_cols);
     }
     else
     {

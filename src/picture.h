@@ -11,9 +11,10 @@ typedef enum
     PICTURES_OFF,
     PICTURES_KITTY, // kitty graphics protocol: kitty, Ghostty, WezTerm with enable_kitty_graphics
     PICTURES_ITERM, // iTerm2 inline images (OSC 1337): WezTerm, iTerm2
+    PICTURES_SIXEL, // sixel: WezTerm / iTerm2 inside tmux >= 3.4, which keeps and redraws them
 } picture_protocol;
 
-// EUROS_IMAGES=kitty|iterm|off, else guessed from the terminal. Off when stdout is not a terminal.
+// EUROS_IMAGES=kitty|iterm|sixel|off, else guessed from the terminal. Off when stdout is not a terminal.
 picture_protocol picture_detect(void);
 
 const char *picture_protocol_name(picture_protocol p);
@@ -33,6 +34,9 @@ unsigned char *picture_shrink(const unsigned char *src, int sw, int sh, int dw, 
 // kitty graphics escape sequence for RGB pixels shown `rows` cells high (zlib, 4096-byte chunks,
 // no replies from the terminal). Caller frees.
 char *picture_kitty_sequence(const unsigned char *rgb, int w, int h, int rows);
+
+// Sixel DCS for RGB pixels at their own size, dithered onto a 6×6×6 color cube. Caller frees.
+char *picture_sixel_sequence(const unsigned char *rgb, int w, int h);
 
 // Each escape sequence in seq wrapped for tmux passthrough (\033Ptmux; ... \033\\, inner ESCs doubled).
 // Caller frees.

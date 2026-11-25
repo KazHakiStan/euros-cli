@@ -300,7 +300,7 @@ static int cmd_show(const char *path)
     int rc = 0;
     if (p == PICTURES_OFF)
     {
-        fprintf(stderr, "No picture protocol for this terminal. Try EUROS_IMAGES=kitty or EUROS_IMAGES=iterm.\n");
+        fprintf(stderr, "No picture protocol for this terminal. Try EUROS_IMAGES=kitty, iterm or sixel.\n");
     }
     else if (picture_show(p, data->valuestring, 60, 16) == false)
     {
