@@ -47,6 +47,7 @@ add_library(euros_core STATIC
   src/room.c
   src/input.c
   src/lineedit.c
+  src/notify.c
   src/chat.c
   src/letters.c
   src/forum.c
@@ -109,6 +110,10 @@ add_test(NAME version COMMAND test_version)
 add_executable(test_markup tests/test_markup.c)
 target_link_libraries(test_markup PRIVATE euros_core)
 add_test(NAME markup COMMAND test_markup)
+
+add_executable(test_notify tests/test_notify.c)
+target_link_libraries(test_notify PRIVATE euros_core)
+add_test(NAME notify COMMAND test_notify)
 
 add_executable(test_picture tests/test_picture.c)
 target_link_libraries(test_picture PRIVATE euros_core)

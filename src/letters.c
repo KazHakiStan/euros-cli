@@ -2,6 +2,7 @@
 #include "cli.h"
 #include "keys.h"
 #include "letters.h"
+#include "notify.h"
 #include "platform.h"
 #include "room.h"
 #include "session.h"
@@ -260,6 +261,7 @@ static int read_one(euros_session *s, const cJSON *profiles, const cJSON *letter
         return api_fail(&err);
     }
     printf("✉ burned.\n");
+    notify_seen(id); // its notification is done with
     if (opened)
     {
         send_read_receipt(s, id, from);

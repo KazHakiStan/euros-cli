@@ -4,6 +4,7 @@
 #include "input.h"
 #include "letters.h"
 #include "lineedit.h"
+#include "notify.h"
 #include "picture.h"
 #include "platform.h"
 #include "realtime.h"
@@ -29,12 +30,32 @@
 #define PICTURE_COLS 48
 #define PICTURE_ROWS 12
 #define RECENT_MAX 200 // messages kept to fill the full screen when it opens
+#define MAX_WATCHED 32  // other rooms listened to for notifications
 
+typedef struct chat chat;
+
+// Another room of the user: listened to without presence (nobody sees us there, we don't answer
+// for its memory), only to notice messages and mentions.
 typedef struct
 {
-    euros_session session;
+    chat *chat;
     rt_channel *ch;
+    bool closed;
+    char topic[64];
+    char name[64];
+} watched_room;
+
+struct chat
+{
+    euros_session session;
+    rt_socket *sock; // one WebSocket for every channel below
+    rt_channel *ch;
+    bool ch_closed;    // the server dropped the room channel: join again
     rt_channel *inbox; // inbox:<me>: new letters and read receipts
+    bool inbox_closed;
+    watched_room watched[MAX_WATCHED];
+    int watched_count;
+    int focus; // the last focus state seen (le_focus)
     room *room;
     cJSON *nicks; // user id → nickname
     char topic[64];
@@ -49,7 +70,7 @@ typedef struct
     long long printed; // messages printed so far
     long long fs_from; // `printed` when the full screen opened
     bool replaying;
-} chat;
+};
 
 static bool same_text_ci(const char *a, const char *b)
 {
@@ -217,6 +238,39 @@ static bool mentions_me(const chat *c, const char *body)
     return false;
 }
 
+// Someone else's message becomes a notification, unless the user is looking at it: then it is only
+// marked seen, so another euros running elsewhere doesn't count it either.
+static void note_message(chat *c, const char *topic, const char *room_name, const cJSON *m, bool looking)
+{
+    const char *author = cJSON_GetObjectItemCaseSensitive(m, "author")->valuestring;
+    const char *id = cJSON_GetObjectItemCaseSensitive(m, "id")->valuestring;
+    if (strcmp(author, c->session.user_id) == 0)
+    {
+        return;
+    }
+    if (looking)
+    {
+        notify_seen(id);
+        return;
+    }
+    const char *body = cJSON_GetObjectItemCaseSensitive(m, "body")->valuestring;
+    const char *known = nick_of(c, author);
+    char nick[48];
+    snprintf(nick, sizeof nick, known != NULL ? "%s" : "%s?",
+             known != NULL ? known : cJSON_GetObjectItemCaseSensitive(m, "nick")->valuestring);
+    bool mention = mentions_me(c, body);
+    note n = {
+        .kind = mention ? "mention" : "message",
+        .id = id,
+        .topic = topic,
+        .room = room_name,
+        .from = nick,
+        .text = mention ? body : NULL,
+        .ts = platform_now_ms(),
+    };
+    notify_add(&n);
+}
+
 static void print_picture(const chat *c, const cJSON *img)
 {
     int w = (int)cJSON_GetObjectItemCaseSensitive(img, "w")->valuedouble;
@@ -370,6 +424,7 @@ static void hook_message(void *ui, const cJSON *msg)
         return;
     }
     print_message(c, msg);
+    note_message(c, c->topic, c->room_name, msg, c->focus != 0);
 }
 
 static void hook_history(void *ui, const cJSON *msgs)
@@ -435,12 +490,18 @@ static void hook_failed(void *ui, const cJSON *msg)
 static void on_channel(void *ctx, const char *event, const cJSON *payload)
 {
     chat *c = ctx;
+    if (strcmp(event, "closed") == 0)
+    {
+        c->ch_closed = true;
+        return;
+    }
     room_on_event(c->room, event, payload, platform_now_ms());
 }
 
-static bool connect_room(chat *c, bool *connected, char *err, size_t err_size)
+static bool connect_room(chat *c, char *err, size_t err_size)
 {
-    c->ch = rt_join(c->topic, c->session.user_id, NULL, c->session.access_token, on_channel, c, connected, err,
+    c->ch_closed = false;
+    c->ch = rt_join(c->sock, c->topic, c->session.user_id, NULL, c->session.access_token, on_channel, c, err,
                     err_size);
     if (c->ch == NULL)
     {
@@ -457,16 +518,30 @@ static bool connect_room(chat *c, bool *connected, char *err, size_t err_size)
 static void on_inbox(void *ctx, const char *event, const cJSON *payload)
 {
     chat *c = ctx;
+    if (strcmp(event, "closed") == 0)
+    {
+        c->inbox_closed = true;
+        return;
+    }
     if (strcmp(event, "postgres_changes") == 0)
     {
         const cJSON *data = cJSON_GetObjectItemCaseSensitive(payload, "data");
         const cJSON *record = cJSON_GetObjectItemCaseSensitive(data, "record");
         const cJSON *from = cJSON_GetObjectItemCaseSensitive(record, "from_id");
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(record, "id");
         char painted[PAINTED_SIZE];
         const char *nick = cJSON_IsString(from)
             ? painted_nick(c, from->valuestring, painted)
             : "someone";
         system_line(c, "✉ a letter from %s · /letters", nick);
+        // a letter waits to be read wherever the user looks: it stays until `euros read` burns it
+        note n = {
+            .kind = "letter",
+            .id = cJSON_IsString(id) ? id->valuestring : NULL,
+            .from = cJSON_IsString(from) ? nick_or_unknown(c, from->valuestring) : NULL,
+            .ts = platform_now_ms(),
+        };
+        notify_add(&n);
         return;
     }
     if (strcmp(event, "broadcast") != 0)
@@ -485,6 +560,18 @@ static void on_inbox(void *ctx, const char *event, const cJSON *payload)
         {
             char painted[PAINTED_SIZE];
             system_line(c, "✉ %s read your letter", paint(c, nick, painted));
+            const cJSON *letter = cJSON_GetObjectItemCaseSensitive(body, "id");
+            char id[96];
+            snprintf(id, sizeof id, "read:%s", cJSON_IsString(letter) ? letter->valuestring : by->valuestring);
+            if (c->focus != 0)
+            {
+                notify_seen(id);
+            }
+            else
+            {
+                note n = { .kind = "receipt", .id = id, .from = nick, .ts = platform_now_ms() };
+                notify_add(&n);
+            }
         }
     }
 }
@@ -494,9 +581,133 @@ static bool connect_inbox(chat *c, char *err, size_t err_size)
     char topic[64];
     snprintf(topic, sizeof topic, "inbox:%s", c->session.user_id);
     cJSON *changes = letters_changes_binding(c->session.user_id);
-    c->inbox = rt_join(topic, NULL, changes, c->session.access_token, on_inbox, c, NULL, err, err_size);
+    c->inbox_closed = false;
+    c->inbox = rt_join(c->sock, topic, NULL, changes, c->session.access_token, on_inbox, c, err, err_size);
     cJSON_Delete(changes);
     return c->inbox != NULL;
+}
+
+static void on_watched(void *ctx, const char *event, const cJSON *payload)
+{
+    watched_room *w = ctx;
+    if (strcmp(event, "closed") == 0)
+    {
+        w->closed = true;
+        return;
+    }
+    if (strcmp(event, "broadcast") != 0)
+    {
+        return; // presence is off; history requests are for those who are really there
+    }
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(payload, "event");
+    const cJSON *msg = cJSON_GetObjectItemCaseSensitive(payload, "payload");
+    if (cJSON_IsString(name) && strcmp(name->valuestring, "msg") == 0 && room_valid_message(msg))
+    {
+        note_message(w->chat, w->topic, w->name, msg, false);
+    }
+}
+
+// #everyone and every group of the user, except the room we are in.
+static void load_watched(chat *c)
+{
+    c->watched_count = 0;
+    cJSON *rows = api_select(&c->session, "groups?select=id,name&order=created_at", NULL);
+    cJSON *all = cJSON_CreateArray();
+    cJSON *main_room = cJSON_CreateObject();
+    cJSON_AddStringToObject(main_room, "topic", "room:main");
+    cJSON_AddStringToObject(main_room, "name", "#everyone");
+    cJSON_AddItemToArray(all, main_room);
+    const cJSON *row;
+    cJSON_ArrayForEach(row, rows)
+    {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(row, "id");
+        const cJSON *group = cJSON_GetObjectItemCaseSensitive(row, "name");
+        if (cJSON_IsString(id) && cJSON_IsString(group))
+        {
+            char topic[64];
+            snprintf(topic, sizeof topic, "room:%s", id->valuestring);
+            cJSON *entry = cJSON_CreateObject();
+            cJSON_AddStringToObject(entry, "topic", topic);
+            cJSON_AddStringToObject(entry, "name", group->valuestring);
+            cJSON_AddItemToArray(all, entry);
+        }
+    }
+    cJSON_Delete(rows);
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, all)
+    {
+        const char *topic = cJSON_GetObjectItemCaseSensitive(entry, "topic")->valuestring;
+        if (strcmp(topic, c->topic) == 0 || c->watched_count == MAX_WATCHED)
+        {
+            continue;
+        }
+        watched_room *w = &c->watched[c->watched_count++];
+        memset(w, 0, sizeof *w);
+        w->chat = c;
+        snprintf(w->topic, sizeof w->topic, "%s", topic);
+        snprintf(w->name, sizeof w->name, "%s", cJSON_GetObjectItemCaseSensitive(entry, "name")->valuestring);
+    }
+    cJSON_Delete(all);
+}
+
+// Joins the watched rooms not joined yet. Returns how many are listened to now.
+static int connect_watched(chat *c)
+{
+    int listening = 0;
+    for (int i = 0; i < c->watched_count; ++i)
+    {
+        watched_room *w = &c->watched[i];
+        if (w->ch == NULL)
+        {
+            char err[256];
+            w->closed = false;
+            w->ch = rt_join(c->sock, w->topic, NULL, NULL, c->session.access_token, on_watched, w, err, sizeof err);
+        }
+        listening += w->ch != NULL;
+    }
+    return listening;
+}
+
+// Channels the server closed are left, to be joined again.
+static void drop_closed(chat *c)
+{
+    if (c->ch_closed)
+    {
+        rt_leave(c->ch);
+        c->ch = NULL;
+        c->ch_closed = false;
+    }
+    if (c->inbox_closed)
+    {
+        rt_leave(c->inbox);
+        c->inbox = NULL;
+        c->inbox_closed = false;
+    }
+    for (int i = 0; i < c->watched_count; ++i)
+    {
+        if (c->watched[i].closed)
+        {
+            rt_leave(c->watched[i].ch);
+            c->watched[i].ch = NULL;
+            c->watched[i].closed = false;
+        }
+    }
+}
+
+// The socket is gone: so is every channel on it.
+static void disconnect(chat *c)
+{
+    rt_close(c->sock);
+    c->sock = NULL;
+    c->ch = NULL;
+    c->inbox = NULL;
+    c->ch_closed = false;
+    c->inbox_closed = false;
+    for (int i = 0; i < c->watched_count; ++i)
+    {
+        c->watched[i].ch = NULL;
+        c->watched[i].closed = false;
+    }
 }
 
 // "Nick, Nick, Nick" for everyone in the room.
@@ -548,19 +759,19 @@ static void print_logo(const chat *c)
 static bool enter_with_header(chat *c)
 {
     print_logo(c);
-    bool connected = false;
     char err[256] = "";
-    bool joined = connect_room(c, &connected, err, sizeof err);
     char failure[300];
-    snprintf(failure, sizeof failure, "fail (%s)", err);
-    if (connected == false)
+    c->sock = rt_connect(err, sizeof err);
+    if (c->sock == NULL)
     {
+        snprintf(failure, sizeof failure, "fail (%s)", err);
         header_step(c, "connecting relay", failure, false);
         return false;
     }
     header_step(c, "connecting relay", "ok", true);
-    if (joined == false)
+    if (connect_room(c, err, sizeof err) == false)
     {
+        snprintf(failure, sizeof failure, "fail (%s)", err);
         header_step(c, "private channel", failure, false);
         return false;
     }
@@ -575,7 +786,7 @@ static bool enter_with_header(chat *c)
         {
             break;
         }
-        if (rt_pump(c->ch, 50) == false)
+        if (rt_pump(c->sock, 50) == false)
         {
             break;
         }
@@ -612,6 +823,15 @@ static bool enter_with_header(chat *c)
         snprintf(letters_status, sizeof letters_status, "%d unread", unread);
     }
     header_step(c, "letters", letters_status, loaded);
+
+    load_watched(c);
+    int listening = connect_watched(c);
+    char watch_status[48] = "none";
+    if (c->watched_count > 0)
+    {
+        snprintf(watch_status, sizeof watch_status, "%d/%d", listening, c->watched_count);
+    }
+    header_step(c, "other rooms", watch_status, listening == c->watched_count);
 
     int fresh = forum_unread(&c->session);
     char forum_status[32] = "nothing new";
@@ -686,6 +906,23 @@ static void print_who(chat *c)
     char who[1024];
     who_is_here(c, who, sizeof who);
     system_line(c, "in %s: %s", c->room_name, who);
+}
+
+static void emit_notification(void *ctx, const char *text)
+{
+    system_line(ctx, "%s", text);
+}
+
+// ":n": what came while the user wasn't looking (":n all": the recent ones too); then all read.
+static void print_notifications(chat *c, bool all)
+{
+    cJSON *doc = notify_load();
+    if (notify_doc_lines(doc, all == false, emit_notification, c) == 0)
+    {
+        system_line(c, "no notifications");
+    }
+    cJSON_Delete(doc);
+    notify_mark_read(NULL);
 }
 
 static void print_letters(chat *c)
@@ -779,6 +1016,8 @@ static bool run_command(chat *c, char lead, const char *cmd)
     static const char *const QUIT[] = { "quit", "exit", NULL };
     static const char *const VIM_QUIT[] = { "q", "q!", "qa", "qa!", "wq", "x", NULL };
     static const char *const FULLSCREEN[] = { "fs", "fullscreen", NULL };
+    static const char *const NOTIFICATIONS[] = { "n", "notifs", "notifications", NULL };
+    static const char *const ALL_NOTIFICATIONS[] = { "n all", "notifs all", "notifications all", NULL };
     if (is_one_of(cmd, QUIT) || (lead == ':' && is_one_of(cmd, VIM_QUIT)))
     {
         return false;
@@ -795,6 +1034,10 @@ static bool run_command(chat *c, char lead, const char *cmd)
     {
         send_picture(c, cmd + 3);
     }
+    else if (is_one_of(cmd, NOTIFICATIONS) || is_one_of(cmd, ALL_NOTIFICATIONS))
+    {
+        print_notifications(c, is_one_of(cmd, ALL_NOTIFICATIONS));
+    }
     else if (is_one_of(cmd, FULLSCREEN))
     {
         toggle_fullscreen(c);
@@ -806,7 +1049,7 @@ static bool run_command(chat *c, char lead, const char *cmd)
     else if (cmd[0] != '\0' || lead == '/')
     {
         system_line(c, "/who: who is here · /letters: your letters · /img <file>: send a picture · "
-                       "/fs: full screen on/off · /quit: leave · the same with \":\" (:q, :fs) · "
+                       "/fs: full screen on/off · /n: notifications (/n all) · /quit: leave · the same with \":\" (:q, :fs) · "
                        "@Nick: mention (they get a notification)");
     }
     return true;
@@ -847,13 +1090,9 @@ static void keep_token_fresh(chat *c)
     {
         return;
     }
-    if (c->ch != NULL)
+    if (c->sock != NULL)
     {
-        rt_set_token(c->ch, c->session.access_token);
-    }
-    if (c->inbox != NULL)
-    {
-        rt_set_token(c->inbox, c->session.access_token);
+        rt_set_token(c->sock, c->session.access_token);
     }
 }
 
@@ -901,26 +1140,46 @@ static void run_loop(chat *c)
     char line[8192];
     for (;;)
     {
-        if (c->ch != NULL && rt_pump(c->ch, wait_ms) == false)
+        if (c->sock != NULL && rt_pump(c->sock, wait_ms) == false)
         {
-            rt_leave(c->ch);
-            c->ch = NULL;
+            disconnect(c);
             system_line(c, "connection lost, reconnecting…");
         }
-        if (c->inbox != NULL && rt_pump(c->inbox, 0) == false)
-        {
-            rt_leave(c->inbox);
-            c->inbox = NULL;
-        }
+        drop_closed(c);
         if (c->ch == NULL)
         {
-            platform_sleep_ms(RECONNECT_MS);
+            if (c->sock == NULL)
+            {
+                platform_sleep_ms(RECONNECT_MS);
+            }
             keep_token_fresh(c);
             char err[256];
-            if (connect_room(c, NULL, err, sizeof err))
+            if (c->sock == NULL)
+            {
+                c->sock = rt_connect(err, sizeof err);
+            }
+            if (c->sock != NULL && connect_room(c, err, sizeof err))
             {
                 system_line(c, "back in %s", c->room_name);
+                if (c->inbox == NULL)
+                {
+                    connect_inbox(c, err, sizeof err);
+                }
+                connect_watched(c);
             }
+            else
+            {
+                disconnect(c); // start over with a fresh socket
+            }
+        }
+        int focus = le_focus();
+        if (focus != c->focus)
+        {
+            if (focus == 1)
+            {
+                notify_mark_read(c->topic); // back at the window: this room's news are on screen
+            }
+            c->focus = focus;
         }
         for (;;)
         {
@@ -948,6 +1207,10 @@ static void run_loop(chat *c)
                 char err[256];
                 connect_inbox(c, err, sizeof err);
             }
+            if (c->ch != NULL)
+            {
+                connect_watched(c);
+            }
         }
     }
 }
@@ -959,8 +1222,7 @@ static void cleanup(chat *c)
         toggle_fullscreen(c); // back to the normal screen with what came meanwhile
     }
     le_stop();
-    rt_leave(c->ch);
-    rt_leave(c->inbox);
+    rt_close(c->sock);
     room_destroy(c->room);
     cJSON_Delete(c->nicks);
     cJSON_Delete(c->held);
@@ -974,6 +1236,7 @@ int chat_run(int argc, char **argv)
     c.color = term_stdout_is_tty();
     c.pictures = picture_detect();
     c.in_header = true;
+    c.focus = -1;
     c.held = cJSON_CreateArray();
     c.recent = cJSON_CreateArray();
     if (session_load(&c.session) == false)
@@ -1017,6 +1280,7 @@ int chat_run(int argc, char **argv)
         return 1;
     }
 
+    notify_mark_read(c.topic); // entering the room shows what is in it
     c.keyboard = le_start();
     if (c.keyboard)
     {

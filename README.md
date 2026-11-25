@@ -36,7 +36,7 @@ euros login [--not-my-device]   personal password, or an invite code to join
 euros whoami
 euros invite                    create an invite
 euros invites                   list your invites
-euros chat [group]              live room: #everyone or one of your groups (/who, /letters, /img <file>, /fs, /quit)
+euros chat [group]              live room: #everyone or one of your groups (/who, /letters, /img <file>, /fs, /n, /quit)
 euros rooms                     #everyone and your groups
 euros letters                   unread letters, oldest first
 euros read [n]                  show letter n; Enter burns it and tells the sender
@@ -48,6 +48,8 @@ euros forum post <board> [--title T] [--ttl 1|7|30]
 euros forum reply <id>
 euros forum delete <id> [n]     the thread, or its reply n (yours; the founder: any)
 euros forum pin|unpin|lock|unlock <id> · new-board <name> [description]   founder
+euros notifs [--all] [--keep]   what the chat noticed while you weren't looking; then it is all read
+euros notifs read [room | n]    mark read: all, one room (`room:<id>`) or item n · `euros notifs clear`
 euros show <file>               draw a picture the way the chat would: checks your terminal
 euros update [--yes]            install the latest release
 euros logout
@@ -62,6 +64,29 @@ screen, `:who`, `:letters`, `:img <file>` work like their `/` versions, Esc drop
 sends `:)`. `/fs` (or `:fs`) switches to a full screen: the alternate screen with the messages above a
 rule and the input on the last line; it opens with the recent messages, and closing it prints
 whatever came meanwhile into the normal scrollback.
+
+### Notifications
+
+While `euros chat` runs it also listens to your other rooms (#everyone and every group of yours) on
+the same connection, without presence: nobody sees you there and you don't answer for their memory.
+What you haven't seen becomes a notification: mentions (`@you`) with their text, other messages only
+counted per room (their words stay in the room), new letters and read receipts. Messages in the room
+you are in count only while the terminal window is not focused (focus reporting: WezTerm, iTerm2,
+kitty; in tmux `set -g focus-events on`), and coming back to the window marks that room read.
+
+`/n` or `:n` in the chat (or `euros notifs` outside) lists them and marks them read; `:n all` shows
+the recent read ones too. They are kept in `~/.config/euros/notifications.json` (`%APPDATA%\euros\`
+on Windows), readable only by you, for the terminal to show:
+
+```json
+{ "unread": 3, "mentions": 1,
+  "items": [ { "n": 16, "ts": 1764079200000, "kind": "mention", "room": "devs", "topic": "room:<id>",
+               "from": "Nick", "text": "@you look", "pane": "12", "read": false }, ... ] }
+```
+
+`kind` is `mention`, `message`, `letter` or `receipt`; `pane` is the `WEZTERM_PANE` of the chat that
+noticed it. A status bar reads `unread` / `mentions`; changes go through `euros notifs read …`, which
+takes the file's lock. Two chats running at once don't count a message twice.
 
 A letter opens on the terminal's alternate screen, so once it burns nothing is left in the scrollback.
 
@@ -119,9 +144,10 @@ src/chat.*       `chat` / `rooms`: the live room, line-mode output
 src/letters.*    `letters` / `read` / `write`
 src/forum.*      `forum`: boards, threads, replies, founder tools, "new" marks
 src/picture.*    pictures: terminal protocol, decode / shrink / JPEG, kitty and iTerm2 output
+src/notify.*     notifications: the file, `notifs`, the lines shown by :n
 src/update.*     release check, `version` / `update`
 src/room.*       room protocol: message validation, room memory (no I/O)
-src/realtime.*   Phoenix Channels over WebSocket: join, heartbeat, broadcast, presence, postgres_changes
+src/realtime.*   Phoenix Channels over one WebSocket: many channels, join, heartbeat, broadcast, presence, postgres_changes
 src/ws.*         WebSocket over libcurl
 src/api.*        Supabase Auth and PostgREST calls
 src/keys.*       personal key: normalize, generate, derive; letter encryption
@@ -130,7 +156,7 @@ src/lineedit.*   raw keyboard with the input line pinned under the output
 src/input.*      stdin reader thread for pipes
 src/platform.*   OS differences: config dir, hidden input, owner-only files, UTF-8 console and arguments
 src/term.*, cli.*, http.*, session.*, config.*, version.*   shared helpers
-tests/           crypto vectors, room protocol, letters, markup, pictures, versions
+tests/           crypto vectors, room protocol, letters, markup, pictures, versions, notifications
 third_party/     cJSON (MIT), stb_image and stb_image_write (MIT / public domain)
 install.sh, install.ps1, scripts/, .github/workflows/release.yml   installers and release builds
 ```

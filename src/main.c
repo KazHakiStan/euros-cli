@@ -5,6 +5,7 @@
 #include "http.h"
 #include "keys.h"
 #include "letters.h"
+#include "notify.h"
 #include "picture.h"
 #include "platform.h"
 #include "session.h"
@@ -42,6 +43,8 @@ static const char *USAGE =
     "  euros read [n]                  read letter n (default: the oldest); it burns when you close it\n"
     "  euros write <nick> [--ttl D]    write a letter; unread, it burns after D = 1, 7 (default) or 30 days\n"
     "  euros forum [...]               boards, threads, replies (`euros forum help` for the rest)\n"
+    "  euros notifs [--all] [--keep]   what the chat noticed while you weren't looking; then all read\n"
+    "                                  (`euros notifs read`: mark read, `euros notifs clear`: forget them)\n"
     "  euros show <file>               show a picture here the way the chat would (checks your terminal)\n"
     "  euros logout                   sign out and forget this device\n"
     "  euros version                   this version, and whether a newer one is out\n"
@@ -381,6 +384,10 @@ int main(int argc, char **argv)
     else if (strcmp(cmd, "write") == 0)
     {
         rc = letters_write(argc - 2, argv + 2);
+    }
+    else if (strcmp(cmd, "notifs") == 0 || strcmp(cmd, "notifications") == 0)
+    {
+        rc = notify_cli(argc - 2, argv + 2);
     }
     else if (strcmp(cmd, "show") == 0)
     {
