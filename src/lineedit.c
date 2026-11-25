@@ -27,6 +27,7 @@ static bool in_input = false;
 static int fs_rows = 0;
 static int fs_cols = 0;
 static char fs_title[128] = "";
+static int focus = -1; // -1: unknown, 0: away, 1: focused
 
 #ifdef _WIN32
 static HANDLE in_handle;
@@ -35,6 +36,7 @@ static wchar_t pending_high = 0; // first half of a UTF-16 surrogate pair
 #else
 static struct termios saved_termios;
 static int escape_state = 0; // 0: none, 1: got ESC, 2: inside "ESC [" sequence
+static int escape_params = 0; // bytes between "ESC [" and the final byte
 #endif
 
 static int terminal_width(void)
@@ -350,6 +352,7 @@ bool le_start(void)
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 #endif
     active = true;
+    printf("\033[?1004h"); // focus in/out reports: ESC [ I / ESC [ O
     redraw();
     return true;
 }
@@ -362,7 +365,7 @@ void le_stop(void)
     }
     le_set_fullscreen(false, NULL);
     active = false;
-    printf("\r\033[K");
+    printf("\033[?1004l\r\033[K");
     fflush(stdout);
 #ifdef _WIN32
     SetConsoleMode(in_handle, saved_mode);
@@ -428,6 +431,11 @@ le_result le_poll(char *out, size_t size)
         {
             break;
         }
+        if (rec.EventType == FOCUS_EVENT)
+        {
+            focus = rec.Event.FocusEvent.bSetFocus ? 1 : 0;
+            continue;
+        }
         if (rec.EventType != KEY_EVENT || rec.Event.KeyEvent.bKeyDown == FALSE)
         {
             continue;
@@ -476,6 +484,7 @@ le_result le_poll(char *out, size_t size)
             escape_state = c == '['
                 ? 2
                 : 0;
+            escape_params = 0;
             continue;
         }
         if (escape_state == 2)
@@ -483,6 +492,14 @@ le_result le_poll(char *out, size_t size)
             if (c >= 0x40 && c <= 0x7e)
             {
                 escape_state = 0; // end of an arrow / function key sequence
+                if (escape_params == 0 && (c == 'I' || c == 'O'))
+                {
+                    focus = c == 'I' ? 1 : 0;
+                }
+            }
+            else
+            {
+                ++escape_params;
             }
             continue;
         }
@@ -515,6 +532,11 @@ le_result le_poll(char *out, size_t size)
         redraw();
     }
     return result;
+}
+
+int le_focus(void)
+{
+    return focus;
 }
 
 void le_hide(void)

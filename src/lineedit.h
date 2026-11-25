@@ -28,6 +28,10 @@ le_result le_poll(char *out, size_t size);
 void le_set_fullscreen(bool on, const char *title);
 bool le_fullscreen(void);
 
+// Whether the terminal window has the focus: 1 yes, 0 no, -1 not reported (yet). Terminals that
+// support focus reporting (WezTerm, iTerm2, kitty; tmux with `focus-events on`) say so on change.
+int le_focus(void);
+
 // Wrap any output: hide removes the input line, show draws it again below the new output.
 void le_hide(void);
 void le_show(void);

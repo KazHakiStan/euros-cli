@@ -1,6 +1,7 @@
 #include "platform.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,7 @@
 #  include <shellapi.h>
 #else
 #  include <fcntl.h>
+#  include <sys/file.h>
 #  include <sys/stat.h>
 #  include <termios.h>
 #  include <unistd.h>
@@ -173,6 +175,48 @@ bool platform_write_private(const char *path, const char *data, size_t len)
         return false;
     }
     return rename(tmp, path) == 0;
+#endif
+}
+
+intptr_t platform_lock(const char *path)
+{
+    for (int attempt = 0; attempt < 50; ++attempt)
+    {
+#ifdef _WIN32
+        // No sharing: a second opener fails until the first closes the handle.
+        HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            return (intptr_t)h;
+        }
+#else
+        int fd = open(path, O_RDWR | O_CREAT, 0600);
+        if (fd < 0)
+        {
+            return -1;
+        }
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0)
+        {
+            return fd;
+        }
+        close(fd);
+#endif
+        platform_sleep_ms(20);
+    }
+    return -1;
+}
+
+void platform_unlock(intptr_t lock)
+{
+    if (lock == -1)
+    {
+        return;
+    }
+#ifdef _WIN32
+    CloseHandle((HANDLE)lock);
+#else
+    flock((int)lock, LOCK_UN);
+    close((int)lock);
 #endif
 }
 

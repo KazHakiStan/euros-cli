@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Call first: UTF-8 console on Windows.
 void platform_init(void);
@@ -23,6 +24,11 @@ bool platform_write_private(const char *path, const char *data, size_t len);
 char *platform_read_file(const char *path, size_t *len_out);
 
 bool platform_remove(const char *path);
+
+// An exclusive lock between processes, held on the file `path` (created if missing). Blocks up to
+// about a second; -1 if it could not be taken. Release with platform_unlock.
+intptr_t platform_lock(const char *path);
+void platform_unlock(intptr_t lock);
 
 // Like platform_read_file, for a UTF-8 path the user typed or passed (any language on Windows too).
 char *platform_read_user_file(const char *utf8_path, size_t *len_out);
