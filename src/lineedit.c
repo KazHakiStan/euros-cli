@@ -20,6 +20,14 @@ static size_t line_len = 0;
 static char prompt[128] = "> ";
 static bool active = false;
 
+// Full screen: the alternate screen with output scrolling above a rule and the input on the last row.
+// The output position is kept with save/restore cursor while the cursor sits on the input row.
+static bool fullscreen = false;
+static bool in_input = false;
+static int fs_rows = 0;
+static int fs_cols = 0;
+static char fs_title[128] = "";
+
 #ifdef _WIN32
 static HANDLE in_handle;
 static DWORD saved_mode;
@@ -45,6 +53,24 @@ static int terminal_width(void)
     }
 #endif
     return 80;
+}
+
+static int terminal_rows(void)
+{
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info) != 0)
+    {
+        return info.srWindow.Bottom - info.srWindow.Top + 1;
+    }
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+    {
+        return ws.ws_row;
+    }
+#endif
+    return 24;
 }
 
 static uint32_t decode(const unsigned char **p)
@@ -124,14 +150,73 @@ static const char *visible_tail(int room)
     return start;
 }
 
+static bool command_mode(void)
+{
+    return line[0] == ':';
+}
+
+static void to_input(void)
+{
+    if (in_input == false)
+    {
+        printf("\0337");
+        in_input = true;
+    }
+    printf("\033[%d;1H", fs_rows);
+}
+
+static void to_output(void)
+{
+    if (in_input)
+    {
+        printf("\0338");
+        in_input = false;
+    }
+}
+
+// Scroll region above the rule; the cursor goes to the bottom of it, where output continues.
+static void layout(void)
+{
+    fs_rows = terminal_rows();
+    fs_cols = terminal_width();
+    in_input = false;
+    int bottom = fs_rows > 3
+        ? fs_rows - 2
+        : 1;
+    printf("\033[1;%dr\033[%d;1H\033[2K\033[2m", bottom, bottom + 1);
+    int used = 0;
+    if (fs_title[0] != '\0')
+    {
+        printf("── %s ", fs_title);
+        used = 4 + text_columns(fs_title);
+    }
+    for (int i = used; i < fs_cols; ++i)
+    {
+        fputs("─", stdout);
+    }
+    printf("\033[0m\033[%d;1H", bottom);
+}
+
 static void redraw(void)
 {
-    int room = terminal_width() - text_columns(prompt) - 1;
+    // ":" first: a vim-like command line, without the prompt.
+    const char *shown_prompt = command_mode()
+        ? ""
+        : prompt;
+    int room = terminal_width() - text_columns(shown_prompt) - 1;
     if (room < 1)
     {
         room = 1;
     }
-    printf("\r\033[K%s%s", prompt, visible_tail(room));
+    if (fullscreen)
+    {
+        to_input();
+        printf("\033[K%s%s", shown_prompt, visible_tail(room));
+    }
+    else
+    {
+        printf("\r\033[K%s%s", shown_prompt, visible_tail(room));
+    }
     fflush(stdout);
 }
 
@@ -191,7 +276,15 @@ static le_result finish_line(char *out, size_t size)
     snprintf(out, size, "%s", line);
     line_len = 0;
     line[0] = '\0';
-    printf("\r\033[K");
+    if (fullscreen)
+    {
+        to_input();
+        printf("\033[K");
+    }
+    else
+    {
+        printf("\r\033[K");
+    }
     fflush(stdout);
     return LE_LINE;
 }
@@ -220,6 +313,13 @@ static le_result control_key(uint32_t key, char *out, size_t size, bool *handled
     case 0x15: // Ctrl+U
         line_len = 0;
         line[0] = '\0';
+        return LE_NONE;
+    case 0x1b: // Esc leaves the command line
+        if (command_mode())
+        {
+            line_len = 0;
+            line[0] = '\0';
+        }
         return LE_NONE;
     default:
         *handled = false;
@@ -260,6 +360,7 @@ void le_stop(void)
     {
         return;
     }
+    le_set_fullscreen(false, NULL);
     active = false;
     printf("\r\033[K");
     fflush(stdout);
@@ -279,10 +380,44 @@ void le_set_prompt(const char *text)
     }
 }
 
+bool le_fullscreen(void)
+{
+    return fullscreen;
+}
+
+void le_set_fullscreen(bool on, const char *title)
+{
+    if (active == false || on == fullscreen)
+    {
+        return;
+    }
+    if (on)
+    {
+        printf("\r\033[K\033[?1049h\033[2J");
+        snprintf(fs_title, sizeof fs_title, "%s", title != NULL ? title : "");
+        fullscreen = true;
+        layout();
+    }
+    else
+    {
+        to_output();
+        printf("\033[r\033[?1049l");
+        fullscreen = false;
+    }
+    redraw();
+}
+
 le_result le_poll(char *out, size_t size)
 {
     bool changed = false;
     le_result result = LE_NONE;
+    if (fullscreen && (terminal_rows() != fs_rows || terminal_width() != fs_cols))
+    {
+        to_output();
+        printf("\033[2J"); // a resized window: start over at the bottom of the new region
+        layout();
+        changed = true;
+    }
 #ifdef _WIN32
     DWORD waiting = 0;
     while (result == LE_NONE && GetNumberOfConsoleInputEvents(in_handle, &waiting) != 0 && waiting > 0)
@@ -368,6 +503,12 @@ le_result le_poll(char *out, size_t size)
             line[line_len] = '\0';
         }
     }
+    if (n > 0 && escape_state == 1 && buf[n - 1] == 0x1b)
+    {
+        escape_state = 0; // nothing came after ESC: the Esc key itself
+        bool handled = false;
+        control_key(0x1b, out, size, &handled);
+    }
 #endif
     if (changed && result == LE_NONE)
     {
@@ -378,7 +519,11 @@ le_result le_poll(char *out, size_t size)
 
 void le_hide(void)
 {
-    if (active)
+    if (active && fullscreen)
+    {
+        to_output();
+    }
+    else if (active)
     {
         printf("\r\033[K");
     }

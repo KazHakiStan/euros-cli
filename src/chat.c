@@ -28,6 +28,7 @@
 #define HEADER_LABEL_WIDTH 26
 #define PICTURE_COLS 48
 #define PICTURE_ROWS 12
+#define RECENT_MAX 200 // messages kept to fill the full screen when it opens
 
 typedef struct
 {
@@ -44,6 +45,10 @@ typedef struct
     bool in_header;
     cJSON *held; // messages that arrived while the header was being printed
     long long quiet_until; // no join/leave lines before this moment
+    cJSON *recent; // the last RECENT_MAX messages printed
+    long long printed; // messages printed so far
+    long long fs_from; // `printed` when the full screen opened
+    bool replaying;
 } chat;
 
 static bool same_text_ci(const char *a, const char *b)
@@ -292,6 +297,53 @@ static void print_message(chat *c, const cJSON *m)
         }
     }
     out_end();
+    if (c->replaying == false)
+    {
+        cJSON_AddItemToArray(c->recent, cJSON_Duplicate(m, true));
+        if (cJSON_GetArraySize(c->recent) > RECENT_MAX)
+        {
+            cJSON_DeleteItemFromArray(c->recent, 0);
+        }
+        ++c->printed;
+    }
+}
+
+// Prints the last `count` remembered messages again.
+static void replay(chat *c, long long count)
+{
+    int size = cJSON_GetArraySize(c->recent);
+    int from = count < size
+        ? size - (int)count
+        : 0;
+    c->replaying = true;
+    for (int i = from; i < size; ++i)
+    {
+        print_message(c, cJSON_GetArrayItem(c->recent, i));
+    }
+    c->replaying = false;
+}
+
+// The full screen starts with the recent messages; closing it prints what came meanwhile, so
+// the normal scrollback misses nothing.
+static void toggle_fullscreen(chat *c)
+{
+    if (c->keyboard == false)
+    {
+        system_line(c, "full screen needs a terminal keyboard");
+        return;
+    }
+    if (le_fullscreen())
+    {
+        le_set_fullscreen(false, NULL);
+        replay(c, c->printed - c->fs_from);
+        return;
+    }
+    char title[96];
+    snprintf(title, sizeof title, "euros · %s", c->room_name);
+    le_set_fullscreen(true, title);
+    c->fs_from = c->printed;
+    replay(c, RECENT_MAX);
+    system_line(c, "full screen · /fs or :fs to leave");
 }
 
 static void update_prompt(chat *c)
@@ -709,6 +761,57 @@ static void send_picture(chat *c, const char *arg)
     cJSON_Delete(img);
 }
 
+static bool is_one_of(const char *s, const char *const *names)
+{
+    for (; *names != NULL; ++names)
+    {
+        if (strcmp(s, *names) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// "/name args" or ":name args" (vim-like). Returns false when the user wants to leave.
+static bool run_command(chat *c, char lead, const char *cmd)
+{
+    static const char *const QUIT[] = { "quit", "exit", NULL };
+    static const char *const VIM_QUIT[] = { "q", "q!", "qa", "qa!", "wq", "x", NULL };
+    static const char *const FULLSCREEN[] = { "fs", "fullscreen", NULL };
+    if (is_one_of(cmd, QUIT) || (lead == ':' && is_one_of(cmd, VIM_QUIT)))
+    {
+        return false;
+    }
+    if (strcmp(cmd, "who") == 0)
+    {
+        print_who(c);
+    }
+    else if (strcmp(cmd, "letters") == 0)
+    {
+        print_letters(c);
+    }
+    else if (strncmp(cmd, "img ", 4) == 0 || strcmp(cmd, "img") == 0)
+    {
+        send_picture(c, cmd + 3);
+    }
+    else if (is_one_of(cmd, FULLSCREEN))
+    {
+        toggle_fullscreen(c);
+    }
+    else if (lead == ':' && cmd[0] != '\0' && strcmp(cmd, "help") != 0)
+    {
+        system_line(c, "not a command: :%s · :help · ::text sends \":text\"", cmd);
+    }
+    else if (cmd[0] != '\0' || lead == '/')
+    {
+        system_line(c, "/who: who is here · /letters: your letters · /img <file>: send a picture · "
+                       "/fs: full screen on/off · /quit: leave · the same with \":\" (:q, :fs) · "
+                       "@Nick: mention (they get a notification)");
+    }
+    return true;
+}
+
 // Returns false when the user wants to leave.
 static bool handle_line(chat *c, const char *line)
 {
@@ -716,30 +819,13 @@ static bool handle_line(chat *c, const char *line)
     {
         return true;
     }
-    if (line[0] == '/')
+    if (strncmp(line, "::", 2) == 0)
     {
-        if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0)
-        {
-            return false;
-        }
-        if (strcmp(line, "/who") == 0)
-        {
-            print_who(c);
-        }
-        else if (strcmp(line, "/letters") == 0)
-        {
-            print_letters(c);
-        }
-        else if (strncmp(line, "/img ", 5) == 0)
-        {
-            send_picture(c, line + 5);
-        }
-        else
-        {
-            system_line(c, "/who: who is here · /letters: your letters · /img <file>: send a picture · "
-                           "/quit: leave · @Nick: mention (they get a notification)");
-        }
-        return true;
+        ++line; // "::)" sends ":)"
+    }
+    else if (line[0] == '/' || line[0] == ':')
+    {
+        return run_command(c, line[0], line + 1);
     }
     if (room_utf16_length(line) > ROOM_MAX_BODY)
     {
@@ -868,12 +954,17 @@ static void run_loop(chat *c)
 
 static void cleanup(chat *c)
 {
+    if (le_fullscreen())
+    {
+        toggle_fullscreen(c); // back to the normal screen with what came meanwhile
+    }
     le_stop();
     rt_leave(c->ch);
     rt_leave(c->inbox);
     room_destroy(c->room);
     cJSON_Delete(c->nicks);
     cJSON_Delete(c->held);
+    cJSON_Delete(c->recent);
     session_wipe(&c->session);
 }
 
@@ -884,6 +975,7 @@ int chat_run(int argc, char **argv)
     c.pictures = picture_detect();
     c.in_header = true;
     c.held = cJSON_CreateArray();
+    c.recent = cJSON_CreateArray();
     if (session_load(&c.session) == false)
     {
         fprintf(stderr, "Not signed in. Run `euros login`.\n");

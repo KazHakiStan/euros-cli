@@ -36,7 +36,7 @@ euros login [--not-my-device]   personal password, or an invite code to join
 euros whoami
 euros invite                    create an invite
 euros invites                   list your invites
-euros chat [group]              live room: #everyone or one of your groups (/who, /letters, /img <file>, /quit)
+euros chat [group]              live room: #everyone or one of your groups (/who, /letters, /img <file>, /fs, /quit)
 euros rooms                     #everyone and your groups
 euros letters                   unread letters, oldest first
 euros read [n]                  show letter n; Enter burns it and tells the sender
@@ -57,6 +57,12 @@ The session lives in `%APPDATA%\euros\session.json` (Windows) or `~/.config/euro
 readable only by you. With `--not-my-device` the letter key is not kept there: `read` and `write`
 ask for the personal password instead.
 
+In the chat a line that starts with `:` is a vim-like command line: `:q` leaves, `:fs` toggles full
+screen, `:who`, `:letters`, `:img <file>` work like their `/` versions, Esc drops the line, and `::)`
+sends `:)`. `/fs` (or `:fs`) switches to a full screen: the alternate screen with the messages above a
+rule and the input on the last line; it opens with the recent messages, and closing it prints
+whatever came meanwhile into the normal scrollback.
+
 A letter opens on the terminal's alternate screen, so once it burns nothing is left in the scrollback.
 
 ### Pictures
@@ -68,9 +74,16 @@ Pictures are drawn in terminals that speak a picture protocol, chosen automatica
 |---|---|
 | kitty, Ghostty | kitty graphics |
 | WezTerm, iTerm2 | iTerm2 inline images (kitty graphics in WezTerm needs `config.enable_kitty_graphics = true`) |
+| WezTerm, iTerm2 inside tmux | sixel |
 | others | `[picture 640x480]` |
 
-Override with `EUROS_IMAGES=kitty|iterm|off`. On Windows pictures show up only if ConPTY passes the
+Override with `EUROS_IMAGES=kitty|iterm|sixel|off`.
+
+Inside tmux (≥ 3.4, built with sixel, as Homebrew's is) pictures are sent as sixel: tmux keeps them in
+the pane, so they survive switching windows and arrive in a window you are not looking at. If tmux
+does not draw them, tell it the terminal can: `set -as terminal-features ',xterm-256color:sixel'`.
+kitty graphics and `EUROS_IMAGES=iterm` go through tmux passthrough instead, which needs
+`set -g allow-passthrough on` and is lost on the next redraw. On Windows pictures show up only if ConPTY passes the
 escape sequences through; `euros show <file>` tells quickly whether yours does.
 
 ## Build
