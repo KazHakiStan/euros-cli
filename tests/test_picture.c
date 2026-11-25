@@ -203,6 +203,17 @@ static void test_kitty_sequence(void)
     free(seq);
 }
 
+static void test_tmux_wrap(void)
+{
+    char *w = picture_tmux_wrap("\033_Gm=1;AB\033\\\033_Gm=0;C\033\\");
+    CHECK(w != NULL && strcmp(w, "\033Ptmux;\033\033_Gm=1;AB\033\033\\\033\\"
+                                 "\033Ptmux;\033\033_Gm=0;C\033\033\\\033\\") == 0);
+    free(w);
+    w = picture_tmux_wrap("\033]1337;File=inline=1:QUJD\a");
+    CHECK(w != NULL && strcmp(w, "\033Ptmux;\033\033]1337;File=inline=1:QUJD\a\033\\") == 0);
+    free(w);
+}
+
 int main(void)
 {
     if (keys_init() == false)
@@ -216,6 +227,7 @@ int main(void)
     test_noise_never_too_big();
     test_not_a_picture();
     test_kitty_sequence();
+    test_tmux_wrap();
     const char *verdict = failures > 0
         ? "FAILED"
         : "ok";

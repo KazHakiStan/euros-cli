@@ -34,4 +34,8 @@ unsigned char *picture_shrink(const unsigned char *src, int sw, int sh, int dw, 
 // no replies from the terminal). Caller frees.
 char *picture_kitty_sequence(const unsigned char *rgb, int w, int h, int rows);
 
+// Each escape sequence in seq wrapped for tmux passthrough (\033Ptmux; ... \033\\, inner ESCs doubled).
+// Caller frees.
+char *picture_tmux_wrap(const char *seq);
+
 #endif

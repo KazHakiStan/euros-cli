@@ -135,7 +135,9 @@ picture_protocol picture_detect(void)
     {
         return PICTURES_KITTY;
     }
-    if (contains(program, "WezTerm") || contains(program, "iTerm.app"))
+    // Inside tmux TERM_PROGRAM says "tmux"; what the outer terminal exported is still inherited.
+    if (contains(program, "WezTerm") || contains(program, "iTerm.app") || contains(term, "wezterm")
+        || getenv("WEZTERM_PANE") != NULL || contains(getenv("LC_TERMINAL"), "iTerm2"))
     {
         return PICTURES_ITERM;
     }
@@ -383,6 +385,8 @@ static int rows_for(int w, int h, int max_cols, int max_rows)
     return rows;
 }
 
+static void put_sequence(const char *seq);
+
 static bool show_kitty(const unsigned char *rgb, int w, int h, int rows)
 {
     int dw = 0, dh = 0;
@@ -396,16 +400,70 @@ static bool show_kitty(const unsigned char *rgb, int w, int h, int rows)
     {
         return false;
     }
-    fputs(seq, stdout);
+    put_sequence(seq);
     free(seq);
     return true;
 }
 
+char *picture_tmux_wrap(const char *seq)
+{
+    bytes out = { 0 };
+    const char *p = seq;
+    while (*p != '\0')
+    {
+        const char *st = strstr(p + 1, "\033\\");
+        const char *bel = strchr(p, '\a');
+        const char *end = st != NULL && (bel == NULL || st < bel)
+            ? st + 2
+            : bel != NULL
+                ? bel + 1
+                : p + strlen(p);
+        bytes_str(&out, "\033Ptmux;");
+        for (const char *c = p; c < end; ++c)
+        {
+            if (*c == '\033')
+            {
+                bytes_put(&out, "\033", 1);
+            }
+            bytes_put(&out, c, 1);
+        }
+        bytes_str(&out, "\033\\");
+        p = end;
+    }
+    if (out.failed || out.data == NULL)
+    {
+        free(out.data);
+        return NULL;
+    }
+    return (char *)out.data;
+}
+
+// tmux swallows picture sequences unless they come wrapped and the user has
+// `set -g allow-passthrough on` (tmux >= 3.3).
+static void put_sequence(const char *seq)
+{
+    char *wrapped = getenv("TMUX") != NULL
+        ? picture_tmux_wrap(seq)
+        : NULL;
+    fputs(wrapped != NULL
+        ? wrapped
+        : seq, stdout);
+    free(wrapped);
+}
+
 static void show_iterm(const char *jpeg_b64, size_t jpeg_len, int rows)
 {
-    printf("\033]1337;File=inline=1;size=%zu;height=%d;preserveAspectRatio=1:", jpeg_len, rows);
-    fputs(jpeg_b64, stdout);
-    fputs("\a", stdout);
+    char head[128];
+    snprintf(head, sizeof head, "\033]1337;File=inline=1;size=%zu;height=%d;preserveAspectRatio=1:", jpeg_len, rows);
+    bytes seq = { 0 };
+    bytes_str(&seq, head);
+    bytes_str(&seq, jpeg_b64);
+    bytes_str(&seq, "\a");
+    if (seq.failed == false)
+    {
+        put_sequence((const char *)seq.data);
+    }
+    free(seq.data);
 }
 
 bool picture_show(picture_protocol p, const char *jpeg_b64, int max_cols, int max_rows)
